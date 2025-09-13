@@ -11,6 +11,7 @@
 #       --kernel-branch rpi-4.19.y \
 #       --kernel-defconfig bcm2711_defconfig \
 #       --kernel-localversion 4.19.y-20200607-hardened
+#       --gcc-version gcc-aarch64-linux-
 #
 #   Notes:
 #
@@ -21,6 +22,7 @@
 # ARG_OPTIONAL_SINGLE([kernel-branch],[],[Kernel branch to build],[''])
 # ARG_OPTIONAL_SINGLE([kernel-defconfig],[],[Default kernel config to use],[''])
 # ARG_OPTIONAL_SINGLE([kernel-localversion],[],[Kernel local version],[''])
+# ARG_OPTIONAL_SINGLE([gcc-version],[],[correct gcc version],[''])
 # ARG_HELP([The general script's help msg])
 # ARGBASH_GO()
 # needed because of Argbash --> m4_ignore([
@@ -51,16 +53,18 @@ begins_with_short_option()
 _arg_kernel_branch=""
 _arg_kernel_defconfig=""
 _arg_kernel_localversion=""
-
+_arg_gcc_version=""
 
 print_help()
 {
 	printf '%s\n' "Cross-compiling hardened kernels for Raspberry Pi"
-	printf 'Usage: %s [--kernel-branch <arg>] [--kernel-defconfig <arg>] [--kernel-localversion <arg>] [-h|--help]\n' "$0"
+	printf 'Usage: %s [--kernel-branch <arg>] [--kernel-defconfig <arg>] [--kernel-localversion <arg>] [--gcc-version <arg>] [-h|--help]\n' "$0"
 	printf '\t%s\n' "--kernel-branch: Kernel branch to build (default: '')"
     printf '\t%s\n' "--kernel-defconfig: Default kernel config to use (default: '')"
     printf '\t%s\n' "--kernel-localversion: Kernel local version (default: '')"
-	printf '\t%s\n' "-h, --help: Prints help"
+    printf '\t%s\n' "--gcc-version: GCC version to pass to CROSS_COMPILE parameter (default: '')"
+    printf '\t%s\n' "--arch: arch ie arm64 or arm (default: '')"	
+    printf '\t%s\n' "-h, --help: Prints help"
 }
 
 
@@ -78,7 +82,7 @@ parse_commandline()
 			--kernel-branch=*)
 				_arg_kernel_branch="${_key##--kernel-branch=}"
 				;;
-            --kernel-defconfig)
+                        --kernel-defconfig)
 				test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
 				_arg_kernel_defconfig="$2"
 				shift
@@ -86,14 +90,30 @@ parse_commandline()
 			--kernel-defconfig=*)
 				_arg_kernel_defconfig="${_key##--kernel-defconfig=}"
 				;;
-            --kernel-localversion)
+                        --kernel-localversion)
 				test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
 				_arg_kernel_localversion="$2"
 				shift
 				;;
 			--kernel-localversion=*)
-				_arg_kernel_localversion="${_key##--kernel-localversion=}"
+                                _arg_kernel_localversion="${_key##--kernel-localversion=}"
 				;;
+                        --gcc-version)
+                                test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
+                                _arg_gcc_version="$2"
+                                shift
+                                ;;
+                        --gcc-version=*)
+                                _arg_gcc_version="${_key##--gcc-version=}"
+                                ;;
+                        --arch)
+                                test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
+                                _arg_arch="$2"
+                                shift
+                                ;;
+                        --arch=*)
+                                _arg_arch="${_key##--arch=}"
+                                ;;
 			-h|--help)
 				print_help
 				exit 0
@@ -135,26 +155,27 @@ if [ -z "$_arg_kernel_localversion" ]; then
     exit 1
 fi
 
+# The argument --gcc-version must be specified.
+if [ -z "$_arg_gcc_version" ]; then
+    echo "The argument --gcc-version <arg> is missing."
+    exit 1
+fi
+
+# The argument --arch must be specified.
+if [ -z "$_arg_arch" ]; then
+    echo "The argument --arch <arg> is missing."
+    exit 1
+fi
+
 _workdir=$(pwd)
 _tools_dir=$_workdir/tools
 _kernel_src_dir=$_workdir/linux
-_ccprefix="$_tools_dir/arm-bcm2708/arm-linux-gnueabihf/bin/arm-linux-gnueabihf-"
-_output_dir=/output
-
+_ccprefix=$_arg_gcc_version
+_output_dir=/home/builder/output
 
 # Check that the output directory exists and is writable
 test -d $_output_dir || die "Output directory $_output_dir does not exist" 1
 test -w $_output_dir || die "Output directory $_output_dir is not writable" 1
-
-
-# Install toolchain
-if [ -d $_tools_dir ]; then
-    echo "Using exsiting cross compiler toolchain $_tools_dir"
-else
-    echo "Installing cross compiler toolchain"
-    git clone https://github.com/raspberrypi/tools $_tools_dir \
-        || die "ERROR: Unable to clone the cross compiler toolchain" 1
-fi
 
 
 # Get the kernel source code
@@ -171,6 +192,10 @@ else
 fi
 
 
+export CC=aarch64-linux-gnu-gcc
+export CXX=aarch64-linux-gnu-g++
+export $(dpkg-architecture -aarm64)
+
 cd $_kernel_src_dir
 
 _kernel_version=$(make kernelversion)
@@ -182,7 +207,7 @@ echo "Cleaning up the directory"
 make mrproper
 
 echo "Creating initial .config"
-make ARCH=arm CROSS_COMPILE=$_ccprefix $_arg_kernel_defconfig \
+make ARCH=$_arg_arch CROSS_COMPILE=$_ccprefix $_arg_kernel_defconfig \
     || die "Unable to create initial .config" 1
 
 echo "Setting kernel local version"
@@ -210,19 +235,19 @@ echo "Enabling SELinux"
 ./scripts/config --set-str  CONFIG_DEFAULT_SECURITY "selinux"
 
 # Validate config changes
-make ARCH=arm CROSS_COMPILE=$_ccprefix olddefconfig
+make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- olddefconfig
 
 # Alternatively, update config using menuconfig (interactive)
-# make ARCH=arm CROSS_COMPILE=$_ccprefix menuconfig
+# make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- menuconfig
 
 echo "Building kernel and generating .deb packages"
-DEB_HOST_ARCH=armhf make ARCH=arm CROSS_COMPILE=$_ccprefix deb-pkg -j$(($(nproc)+1)) \
+DEB_HOST_ARCH=$_arg_arch make ARCH=$_arg_arch CROSS_COMPILE=$_ccprefix -j$(($(nproc)+1)) deb-pkg \
     || die "Unable to build or package kernel" 1
 
 ls -al
 
 echo "Moving .deb packages to $_output_dir"
-mv $_workdir/*.deb /output
+mv $_workdir/*.deb $_output_dir/
 
 echo "Compressing kernel source to $_output_dir"
 make clean
