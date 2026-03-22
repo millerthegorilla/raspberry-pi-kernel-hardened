@@ -27,12 +27,16 @@ RUN apt-get update -qq -y && apt-get install --no-install-recommends -qq -y \
         make \
         rsync \
         gcc-aarch64-linux-gnu \
+        g++-aarch64-linux-gnu  \  
         gcc-arm-linux-gnueabihf \
+        g++-arm-linux-gnueabihf \
         debhelper-compat \
         libelf-dev \
         libssl-dev:arm64 \
         crossbuild-essential-armhf \
         crossbuild-essential-arm64 \
+        python3 \
+        lsb-release \
     && update-ca-certificates \
     && apt-get -y autoclean \
     && apt-get -y autoremove \

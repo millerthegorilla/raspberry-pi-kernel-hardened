@@ -1,6 +1,13 @@
 #!/bin/bash
 #
-#   @tschaffter
+#   JamesMiller - forked from @tschaffter
+#
+#   usage with podman/docker:
+#   podman run --rm  -v ./output:/home/builder/output:Z \
+#                       localhost/piharden:1.0 \
+#                       --kernel-branch rpi-6.12.y \
+#                       --kernel-localversion $(date '+%Y%m%d')-hardenedv \
+#                       --arch arm64 --device rpiz2
 #
 #   Cross-compiles the Raspberry Pi kernel with SELinux support and other
 #   hardening features enabled.
@@ -8,21 +15,20 @@
 #   Example:
 #
 #   ./build-kernel.sh \
-#       --kernel-branch rpi-4.19.y \
-#       --kernel-defconfig bcm2711_defconfig \
-#       --kernel-localversion 4.19.y-20200607-hardened
-#       --gcc-version gcc-aarch64-linux-
-#
+#       --kernel-branch rpi-6.12.y \
+#       --kernel-localversion 6.12.y-20250607-hardened
+#       --arch arm64
+#       --device rpi4
+#       --interactive
 #   Notes:
 #
 #   - Identify kernel branch or tag from https://github.com/raspberrypi/linux
 #   - Identify --kernel-defconfig value from https://www.raspberrypi.org/documentation/linux/kernel/building.md
 #   - The value of --kernel-localversion will be returned by `uname -a`
+#   - arch of either arm or arm64
 #
 # ARG_OPTIONAL_SINGLE([kernel-branch],[],[Kernel branch to build],[''])
-# ARG_OPTIONAL_SINGLE([kernel-defconfig],[],[Default kernel config to use],[''])
 # ARG_OPTIONAL_SINGLE([kernel-localversion],[],[Kernel local version],[''])
-# ARG_OPTIONAL_SINGLE([gcc-version],[],[correct gcc version],[''])
 # ARG_HELP([The general script's help msg])
 # ARGBASH_GO()
 # needed because of Argbash --> m4_ignore([
@@ -51,20 +57,21 @@ begins_with_short_option()
 
 # THE DEFAULTS INITIALIZATION - OPTIONALS
 _arg_kernel_branch=""
-_arg_kernel_defconfig=""
 _arg_kernel_localversion=""
-_arg_gcc_version=""
+_arg_interactive=0
+_arg_device=""
+_arg_arch=""
 
 print_help()
 {
 	printf '%s\n' "Cross-compiling hardened kernels for Raspberry Pi"
-	printf 'Usage: %s [--kernel-branch <arg>] [--kernel-defconfig <arg>] [--kernel-localversion <arg>] [--gcc-version <arg>] [-h|--help]\n' "$0"
+	printf 'Usage: %s [--kernel-branch <arg>] [--kernel-localversion <arg>] [--arch <arg>] [--device <arg>] [-h|--help]\n' "$0"
 	printf '\t%s\n' "--kernel-branch: Kernel branch to build (default: '')"
-    printf '\t%s\n' "--kernel-defconfig: Default kernel config to use (default: '')"
-    printf '\t%s\n' "--kernel-localversion: Kernel local version (default: '')"
-    printf '\t%s\n' "--gcc-version: GCC version to pass to CROSS_COMPILE parameter (default: '')"
-    printf '\t%s\n' "--arch: arch ie arm64 or arm (default: '')"	
-    printf '\t%s\n' "-h, --help: Prints help"
+        printf '\t%s\n' "--kernel-localversion: Kernel local version (default: '')"
+        printf '\t%s\n' "--arch: arch ie arm64 or arm (default: '')"
+        printf '\t%s\n' "--device: device shortcode, one of [rpi1,rpicm1,rpiz,rpi2,rpi3,rpiz2,rpi4,rpi400,rpicm4,rpi5]"
+        printf '\t%s\n' "--interactive if present build config interactively"
+        printf '\t%s\n' "-h, --help: Prints help"
 }
 
 
@@ -82,14 +89,6 @@ parse_commandline()
 			--kernel-branch=*)
 				_arg_kernel_branch="${_key##--kernel-branch=}"
 				;;
-                        --kernel-defconfig)
-				test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
-				_arg_kernel_defconfig="$2"
-				shift
-				;;
-			--kernel-defconfig=*)
-				_arg_kernel_defconfig="${_key##--kernel-defconfig=}"
-				;;
                         --kernel-localversion)
 				test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
 				_arg_kernel_localversion="$2"
@@ -98,14 +97,6 @@ parse_commandline()
 			--kernel-localversion=*)
                                 _arg_kernel_localversion="${_key##--kernel-localversion=}"
 				;;
-                        --gcc-version)
-                                test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
-                                _arg_gcc_version="$2"
-                                shift
-                                ;;
-                        --gcc-version=*)
-                                _arg_gcc_version="${_key##--gcc-version=}"
-                                ;;
                         --arch)
                                 test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
                                 _arg_arch="$2"
@@ -113,6 +104,20 @@ parse_commandline()
                                 ;;
                         --arch=*)
                                 _arg_arch="${_key##--arch=}"
+                                ;;
+                        --device)
+                                test $# -lt 2 && die "Missing value for the optional argument '$_key'." 1
+                                _arg_device="$2"
+                                shift
+                                ;;
+                        --device=*)
+                                _arg_device="${_key##--device=}"
+                                ;;
+                        --interactive)
+                                _arg_interactive=1
+                                ;;
+                        --interactive=*)
+                                _arg_interactive=1
                                 ;;
 			-h|--help)
 				print_help
@@ -143,21 +148,9 @@ if [ -z "$_arg_kernel_branch" ]; then
     exit 1
 fi
 
-# The argument --kernel-defconfig must be specified.
-if [ -z "$_arg_kernel_defconfig" ]; then
-    echo "The argument --kernel-defconfig <arg> is missing."
-    exit 1
-fi
-
 # The argument --kernel-localversion must be specified.
 if [ -z "$_arg_kernel_localversion" ]; then
     echo "The argument --kernel-localversion <arg> is missing."
-    exit 1
-fi
-
-# The argument --gcc-version must be specified.
-if [ -z "$_arg_gcc_version" ]; then
-    echo "The argument --gcc-version <arg> is missing."
     exit 1
 fi
 
@@ -167,10 +160,17 @@ if [ -z "$_arg_arch" ]; then
     exit 1
 fi
 
+# The argument --device must be specified.
+if [ -z "$_arg_device" ]; then
+    echo "The argument --device <device> is missing."
+    exit 1
+fi
+
+echo "device is $_arg_device"
+
 _workdir=$(pwd)
 _tools_dir=$_workdir/tools
 _kernel_src_dir=$_workdir/linux
-_ccprefix=$_arg_gcc_version
 _output_dir=/home/builder/output
 
 # Check that the output directory exists and is writable
@@ -191,10 +191,50 @@ else
         || die "Unable to clone kernel source code" 1
 fi
 
+if [ $_arg_arch == "arm64" ];then
+   echo "64 bit"
+   export CC=aarch64-linux-gnu-gcc
+   export CXX=aarch64-linux-gnu-g++
+   export $(dpkg-architecture -aarm64)
+   export CROSS_COMPILE=aarch64-linux-gnu-
+   case "$_arg_device" in
+        rpi3) ;& 
+        rpicm3) ;&
+        rpicm4) ;&
+        rpiz2) ;&
+        rpi4) ;&
+        rpi400) export KERNEL=kernel8 _arg_kernel_defconfig=bcm2711_defconfig
+                 ;;
+        rpi5)   export KERNEL=kernel_2712 _arg_kernel_defconfig=bcm2712_defconfig
+                 ;;
+        *) echo "incorrect device code - please select from one of rpi3,rpicm3,rpicm4,rpiz2,rpi4,rpi400,rpi5"; exit 1
+   esac
+else
+   echo "32 bit"
+   export CC=arm-linux-gnueabihf-gcc
+   export CXX=arm-linux-gnueabihf-g++
+   export $(dpkg-architecture -aarmhf)
+   export CROSS_COMPILE=arm-linux-gnueabihf-
+   case "$_arg_device" in
+        rpi1) ;&
+        rpicm1) ;&
+        rpiz) export KERNEL=kernel _arg_kernel_defconfig=bcmrpi_defconfig
+               ;;
+        rpi2) ;&
+        rpi3) ;&
+        rpicm3) ;&
+        rpiz2) export KERNEL=kernel7 _arg_kernel_defconfig=bcm2709_defconfig
+                ;;
+        rpi4) ;&
+        rpi400) ;&
+        rpicm4) export KERNEL=kernel7l _arg_kernel_defconfig=bcm2711_defconfig
+                 ;;
+        *) echo "incorrect device code - please select from one of rpi1,rpicm1,rpiz,rpi2,rpi3,rpicm3,rpiz2,rpi4,rpi400,rpicm4"; exit 1
+   esac
+fi
 
-export CC=aarch64-linux-gnu-gcc
-export CXX=aarch64-linux-gnu-g++
-export $(dpkg-architecture -aarm64)
+cd $HOME
+# git clone https://github.com/a13xp0p0v/kernel-hardening-checker
 
 cd $_kernel_src_dir
 
@@ -206,9 +246,15 @@ echo "Kernel local version is $_arg_kernel_localversion"
 echo "Cleaning up the directory"
 make mrproper
 
-echo "Creating initial .config"
-make ARCH=$_arg_arch CROSS_COMPILE=$_ccprefix $_arg_kernel_defconfig \
+echo "Creating initial .config defconfig is $_arg_kernel_defconfig"
+make ARCH=$_arg_arch CROSS_COMPILE= $_arg_kernel_defconfig \
     || die "Unable to create initial .config" 1
+
+# $HOME/kernel-hardening-checker/bin/kernel-hardening-checker -g ARM64 > harden_config
+mkdir $HOME/new_config
+./scripts/kconfig/merge_config.sh -m -O $HOME/new_config ./.config ./kernel/configs/hardening.config
+mv .config .config_old
+mv $HOME/new_config/.config $_kernel_src_dir/.config
 
 echo "Setting kernel local version"
 ./scripts/config --set-str  CONFIG_LOCALVERSION "-$_arg_kernel_localversion"
@@ -235,16 +281,15 @@ echo "Enabling SELinux"
 ./scripts/config --set-str  CONFIG_DEFAULT_SECURITY "selinux"
 
 # Validate config changes
-make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- olddefconfig
-
-# Alternatively, update config using menuconfig (interactive)
-# make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- menuconfig
+if [ $_arg_interactive -eq 0 ];then
+   make ARCH=$_arg_arch CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+elif [ $_arg_interactive -eq 1 ];then
+    make ARCH=$_arg_arch CROSS_COMPILE=$CROSS_COMPILE menuconfig
+fi
 
 echo "Building kernel and generating .deb packages"
-DEB_HOST_ARCH=$_arg_arch make ARCH=$_arg_arch CROSS_COMPILE=$_ccprefix -j$(($(nproc)+1)) deb-pkg \
-    || die "Unable to build or package kernel" 1
-
-ls -al
+DEB_HOST_ARCH=${_arg_arch} make ARCH=${_arg_arch} CROSS_COMPILE=${CROSS_COMPILE} -j$(($(nproc)+1)) deb-pkg \
+        || die "Unable to build or package kernel" 1
 
 echo "Moving .deb packages to $_output_dir"
 mv $_workdir/*.deb $_output_dir/
